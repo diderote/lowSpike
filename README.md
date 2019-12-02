@@ -1,4 +1,5 @@
 # lowSpike
-Genomic signal normalization driven by lowest modeled spike-in convergence.
+## Python implementation of a Lowess transformer based on non-parametric local regression models of inter-sample deltas.
 
-Description soon
+Follows API based on scikit-learn
+
