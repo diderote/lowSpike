@@ -52,7 +52,7 @@ def _squared(x):
     return x**2
 
 
-def _choose_idx_pmf(M, fun, size=50000):
+def _choose_idx_pmf(M, fun, random_state, size=50000):
     '''
     Chooses indicies based on a probability mass function.
     
@@ -77,10 +77,10 @@ def _choose_idx_pmf(M, fun, size=50000):
     total = d2.sum()
     pmf2 = d2 / total
     
-    return np.random.choice(pmf2.shape[0], size=size, replace=False, p=pmf2)
+    return random_state.choice(pmf2.shape[0], size=size, replace=False, p=pmf2)
 
 
-def _get_subset_indicies(M, func, combinations, size=50000):
+def _get_subset_indicies(M, func, combinations, random_state, size=50000):
     '''
     From target values, choose indicies for modeling based on 
     the samples with the greatest mean signal difference.
@@ -107,7 +107,7 @@ def _get_subset_indicies(M, func, combinations, size=50000):
     '''
     
     C = _max_diff(M, combinations)
-    return _choice_idx_pmf(M[:,C], func, size=size)
+    return _choice_idx_pmf(M[:,C], func, size=size, random_state=random_state)
 
 
 def _delta(D, x, y, low, s, transform=False):
@@ -337,34 +337,32 @@ def normalize_lowess(X, y=None, subset_size=50000, sample_weight=None, max_iter=
     n_samples, n_features = X.shape
     lr = learning_rate / (n_samples)
     
-    mse = np.array().reshape(n_samples,)
-    
-    X_new = np.log1p(X.T).copy() if logit else X.T.copy()
+    X_new = np.log1p(X).copy() if logit else X.copy()
     #check subset size is within limits of X and y
     
     if y:
-        y_new = np.log1p(y.T).copy() if logit else y.T.copy()
+        y_new = np.log1p(y).copy() if logit else y.copy()
     else:
         #Select a subset from X to model delta matrix
-        X_pm = (X_.sum(axis=0))**2 #based on squared probability - change to fun?
-        y_new = np.random.choice(n_features, size=subset_size,
-                                  replace=False, p=X_pm
-                                 )
+        X_sq = (X_new.sum(axis=0))**2 #based on squared probability - change to fun?
+        y_new = random_state.choice(n_features, size=subset_size,
+                                    replace=False, p=(X_sq / X_sq.sum())
+                                    )
     
     s_comb = np.array(list(itertools.combinations(range(n_samples),2)))
     
     #initialize step model for interpolations
-    model = np.zeros(max_iter, len(s_comb), 2, 2, subset_size)
+    model = np.zeros((max_iter, len(s_comb), 2, 2, subset_size))
     
     #initialize squared error matrix
-    squared_errors = np.zeros(max_iter, n_samples)
+    squared_errors = np.zeros((max_iter, n_samples))
     
     for ii in range(max_iter):
-        s_i = _get_subset_indicies(y_new_, s_comb, size=subset_size)
+        s_i = _get_subset_indicies(y_new, f, s_comb, random_state, size=subset_size)
         X_new, y_new, se, m = _delta_matrix(X_new, y_new, s_i, s_comb, lr, transform)
         
         model[ii,:] = m
-        e[ii, :] = se
+        squared_errors[ii, :] = se
         
         mse = se.mean()
         if mse < tol:
@@ -418,9 +416,6 @@ class lowessTransform():
         If None, the random number generator is the RandomState instance used
         by `np.random`.
     
-    return_n_iter: bool, optional
-        Whether or not to return the number of iterations.
-        
     logit: bool, (default=True)
         Whether to log1p transform data
         
@@ -451,7 +446,7 @@ class lowessTransform():
     '''
     def __init__(self, subset_size=50000, sample_weight=None, max_iter=5, 
                  tol=1e-3, learning_rate=1., fun='squared', fun_args=None, 
-                 random_state=None, return_n_iter=True, logit=True):
+                 random_state=None, logit=True):
         self.subset_size = subset_size
         self.sample_weight = sample_weight
         self.max_iter = max_iter
@@ -459,7 +454,7 @@ class lowessTransform():
         self.learning_rate = learning_rate
         self.fun = fun
         self.fun_args = fun_args
-        self.random_state = random_state,
+        self.random_state = random_state
         self.logit = logit
     
     
@@ -488,11 +483,11 @@ class lowessTransform():
     
         fun_args = {} if self.fun_args is None else self.fun_args
     
-        X_new, y_new, mse,  n_iter, s_comb, model  = normalize_lowess(X=X,, y=y, 
+        X_new, y_new, mse,  n_iter, s_comb, model  = normalize_lowess(X=X, y=y, 
             subset_size=self.subset_size, sample_weight=self.sample_weight,
             max_iter=self.max_iter, tol=self.tol, learning_rate=self.learning_rate,
-            fun=self.fun, fun_args=fun_args, random_state=self.random_state, 
-            return_n_iter=self.return_n_iter, logit=self.logit, transform=transform)
+            fun=self.fun, fun_args=fun_args, random_state=self.random_state,
+            logit=self.logit, transform=transform)
     
         self.y_new_ = y_new
         self.mse_ = mse
@@ -548,7 +543,7 @@ class lowessTransform():
         return self
     
     
-    def transform(self, copy=True):
+    #def transform(self, copy=True):
         
     
         # check is fitted
