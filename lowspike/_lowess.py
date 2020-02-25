@@ -241,7 +241,7 @@ def _delta_matrix(X, y, s_i, combinations, learning_rate, transform=False):
         
 def normalize_lowess(X, y=None, subset_size=50000, sample_weight=None, max_iter=5, 
                       tol=1e-3, learning_rate=1., fun='squared', fun_args=None, 
-                      random_state=None, logit=True, transform=False):
+                      random_state=None, log1p=True, transform=False):
     '''
     Performs a lowess normalization and transformation based on non-parametric
     local regression model of sample differences.
@@ -289,7 +289,7 @@ def normalize_lowess(X, y=None, subset_size=50000, sample_weight=None, max_iter=
         If None, the random number generator is the RandomState instance used
         by `np.random`.
         
-    logit: bool, (default=True)
+    log1p: bool, (default=True)
         Whether to log1p transform data
         
     transform: bool, (default=False)
@@ -337,11 +337,11 @@ def normalize_lowess(X, y=None, subset_size=50000, sample_weight=None, max_iter=
     n_samples, n_features = X.shape
     lr = learning_rate / (n_samples)
     
-    X_new = np.log1p(X).copy() if logit else X.copy()
+    X_new = np.log1p(X).copy() if log1p else X.copy()
     #check subset size is within limits of X and y
     
     if y:
-        y_new = np.log1p(y).copy() if logit else y.copy()
+        y_new = np.log1p(y).copy() if log1p else y.copy()
     else:
         #Select a subset from X to model delta matrix
         X_sq = (X_new.sum(axis=0))**2 #based on squared probability - change to fun?
@@ -372,8 +372,8 @@ def normalize_lowess(X, y=None, subset_size=50000, sample_weight=None, max_iter=
               'tolerance or the maximum number of iterations.')
     
     # capture se matrix?
-    X_new = np.expm1(X_new).T if logit else X_new.T
-    y_new = np.expm1(y_new).T if logit else y_new.T
+    X_new = np.expm1(X_new).T if log1p else X_new.T
+    y_new = np.expm1(y_new).T if log1p else y_new.T
     
     return X_new, y_new, mse, ii + 1, squared_errors, s_comb, model
 
@@ -416,7 +416,7 @@ class lowessTransform():
         If None, the random number generator is the RandomState instance used
         by `np.random`.
     
-    logit: bool, (default=True)
+    log1p: bool, (default=True)
         Whether to log1p transform data
         
     Attributes
@@ -446,7 +446,7 @@ class lowessTransform():
     '''
     def __init__(self, subset_size=50000, sample_weight=None, max_iter=5, 
                  tol=1e-3, learning_rate=1., fun='squared', fun_args=None, 
-                 random_state=None, logit=True):
+                 random_state=None, log1p=True):
         self.subset_size = subset_size
         self.sample_weight = sample_weight
         self.max_iter = max_iter
@@ -455,7 +455,7 @@ class lowessTransform():
         self.fun = fun
         self.fun_args = fun_args
         self.random_state = random_state
-        self.logit = logit
+        self.log1p = log1p
     
     
     def _fit(self, X, y=None, transform=False):
@@ -487,7 +487,7 @@ class lowessTransform():
             subset_size=self.subset_size, sample_weight=self.sample_weight,
             max_iter=self.max_iter, tol=self.tol, learning_rate=self.learning_rate,
             fun=self.fun, fun_args=fun_args, random_state=self.random_state,
-            logit=self.logit, transform=transform)
+            log1pt=self.log1p, transform=transform)
     
         self.y_new_ = y_new
         self.mse_ = mse
