@@ -10,13 +10,11 @@ Python implementation of a Lowess transformer based on non-parametric
 import itertools
 import numbers
 
-import pandas as pd
 import numpy as np
 
-from scipy.interpolate import interp1d
 from statsmodels.nonparametric import smoothers_lowess
 
-__all__ = ['lowessTransform']
+__all__ = ['lowessNorm']
 
 
 def _max_diff(M, combinations):
@@ -73,11 +71,18 @@ def _choose_idx_pmf(M, fun, random_state, size=50000):
     '''
     
     difference = M[:,0] - M[:,1]
-    d2 = fun(difference)
-    total = d2.sum()
-    pmf2 = d2 / total
-    
-    return random_state.choice(pmf2.shape[0], size=size, replace=False, p=pmf2)
+
+    unique_idx = np.unique(difference, return_index=True)[1]
+
+    if len(unique_idx) <= size:
+        return unique_idx
+
+    else:
+        d2 = fun(difference)
+        total = d2.sum()
+        pmf2 = d2 / total
+        
+        return random_state.choice(pmf2.shape[0], size=size, replace=False, p=pmf2)
 
 
 def _get_subset_indicies(M, func, combinations, random_state, size=50000):
@@ -107,10 +112,18 @@ def _get_subset_indicies(M, func, combinations, random_state, size=50000):
     '''
     
     C = _max_diff(M, combinations)
-    return _choice_idx_pmf(M[:,C], func, size=size, random_state=random_state)
+    idx = _choose_idx_pmf(M[:,C], func, size=size, random_state=random_state)
+    
+    # maximize number of useful indicies if small number of indicies found using _max_diff
+    if len(idx) < size:
+        for comb in combinations:
+            n_idx = _choose_idx_pmf(M[:,comb], func, size=size, random_state=random_state)
+            idx = np.unique(np.concatenate((idx, n_idx)))
+    
+    return idx
 
 
-def _delta(D, x, y, low, s, transform=False):
+def _delta(D, x, y, low, s, extrap_fraction, transform=False):
     '''
     Interpolates the lowess model to predict correction values.
     
@@ -130,6 +143,10 @@ def _delta(D, x, y, low, s, transform=False):
     
     s: float
         Learning Rate
+
+    extrap_fraction: float <0,1)
+        Fraction of largest y signal value to use for linear extrapolation when x > y.
+        If 0, no extrapolation and max(y) used for x > y.
         
     transform: bool (default, False)
         Apply model to training data
@@ -143,16 +160,30 @@ def _delta(D, x, y, low, s, transform=False):
         Vector of correction values for one sample target data
     
     '''
-    if low == 0:
-        return (0, 0)
-    
-    interp = interp1d(low[:,0], low[:,1], bounds_error=False, fill_value=(min(x.min(),y.min()), 
-                                  "extrapolate")) # linear at high signal 
 
-    if transform:
-        return (s * interp(x), s * interp(y)) 
-    else:
-        return (0, s * interp(y))
+    # linear at high signal
+    low = np.unique(low, axis=0)
+
+    # transform y
+    y_interp = s * np.interp(y, low[:,0], low[:,1])
+
+    if transform is False:
+        return (0, y_interp)
+
+    x_interp = s * np.interp(x, low[:,0], low[:,1])
+
+    if extrap_fraction > 0:
+        top = round(len(low) * extrap_fraction)
+        
+        #least squares linear extrapolation
+        A = np.vstack([low[-top:,0], np.ones(top)]).T
+        m, c = np.linalg.lstsq(A, low[-top:,1], rcond=None)[0]
+
+        #replace x > y.max() with linear extrapolated values
+        ext_idx = np.argwhere(x > low[:,0].max())
+        x_interp[ext_idx] = m * x[ext_idx] + c
+
+    return (x_interp, y_interp)
 
 
 def _check_random_state(seed):
@@ -177,7 +208,8 @@ def _check_random_state(seed):
                      ' instance' % seed)
 
     
-def _delta_matrix(X, y, s_i, combinations, learning_rate, transform=False):
+def _delta_matrix(X, y, s_i, combinations, learning_rate, extrap_fraction, 
+                  lower_bound, transform=False):
     '''
     One step based on lowess modeled delta matrix
     
@@ -196,6 +228,12 @@ def _delta_matrix(X, y, s_i, combinations, learning_rate, transform=False):
     learning_rate: float, (default: 1.)
         x / n_samples
     
+    extrap_fraction: float, <0,1) 
+        Fraction of largest y values for extrapolation when x > y
+
+    lower_bound : int, float or None (default = None)
+        Lower bound on transformed values
+
     transform: bool (default: False)
         Apply model delta to training data
         
@@ -210,38 +248,35 @@ def _delta_matrix(X, y, s_i, combinations, learning_rate, transform=False):
     
     se: array shape(n_samples)
         Squared Error vector
-    
-    i_model: array shape((n_samples choose 2), 2, 2, subset_size)
-        Model for one iteration of a change matrix (X and y lowes fit)
-    
+
     '''
     
     dx, dy = np.zeros(X.shape), np.zeros(y.shape) #Initialize delta matrix
     
-    i_model = np.zeros(len(combinations), 2, 2, len(s_i))
-    
-    for i, (s1, s2) in enumerate(combinations):
+    for s1, s2 in combinations:
         #Calculated differences betwee two samples
         D = y[s_i, s1] - y[s_i, s2]
         
-        for i_s, s_ in enumerate([s1,s2]):
-            #Model the deltas samples
+        for s_ in [s1,s2]:
+            #Model the deltas samples based on y signal.
             low = smoothers_lowess.lowess(D, y[s_i, s_])[:,:2]
             #Apply the correction
-            ddx, ddy = _delta(D, X[:,s_], y[:, s_], low, learning_rate, transform)
+            ddx, ddy = _delta(D, X[:,s_], y[:, s_], low, learning_rate, extrap_fraction, transform)
             dx[:,s_], dy[:,s_] = dx[:,s_] - ddx, dy[:,s_] - ddy
-        
-            i_model[i, i_s, :] = low 
     
     X, y = X - dx, y - dy
     se = dy**2
-    
-    return X, y, se, i_model
+
+    if isinstance(lower_bound, (int, float)):
+        X, y = X.clip(lower_bound), y.clip(lower_bound)
+
+    return X, y, se
         
         
 def normalize_lowess(X, y=None, subset_size=50000, sample_weight=None, max_iter=5, 
                       tol=1e-3, learning_rate=1., fun='squared', fun_args=None, 
-                      random_state=None, log1p=True, transform=False):
+                      random_state=None, extrap_fraction=.1, lower_bound=None,
+                      transform=False):
     '''
     Performs a lowess normalization and transformation based on non-parametric
     local regression model of sample differences.
@@ -260,23 +295,23 @@ def normalize_lowess(X, y=None, subset_size=50000, sample_weight=None, max_iter=
     subset_size : int, optional
         Number of regions to guide the transformation.  If None, all are used.
     
-    sample_weight: array-like of shape (n_samples,) (default=None)
+    sample_weight : array-like of shape (n_samples,) (default=None)
         Individual weights for each sample.  If None, every sample
         will have the same weight.
     
-    max_iter: int, optional
+    max_iter : int, optional
         Maximum nubmer of iterations during fit.
         
     tol : float, (default: 0.001)
         A positive scalar giving the tolerance at which the
         model is considered to have converged. 
     
-    learning_rate: float, (default: 1.)
+    learning_rate : float, (default: 1.)
         Learning rate at each iteration. Multiple of the per sample step at each 
         iteration.  ie. Learning rate of 1.0 corrects by 1.0 / num_samples at each 
         iteration.
 
-    fun: string or function, optional. Default: 'squared'
+    fun : string or function, optional. Default: 'squared'
         Function used for determining the weigthed probability for subset selection.
     
     fun_args : dictionary, optional
@@ -288,11 +323,14 @@ def normalize_lowess(X, y=None, subset_size=50000, sample_weight=None, max_iter=
         If RandomState instance, random_state is the random number generator;
         If None, the random number generator is the RandomState instance used
         by `np.random`.
-        
-    log1p: bool, (default=True)
-        Whether to log1p transform data
-        
-    transform: bool, (default=False)
+    
+    extrap_fraction : float <0,1) default: 0.1
+        Fraction of largest y values to use for extrapolation where x > y.
+
+    lower_bound : int, float or None (default = None)
+        Lower bound on transformed values
+
+    transform : bool, (default=False)
         Whether to correct traning values
     
     Returns
@@ -315,9 +353,6 @@ def normalize_lowess(X, y=None, subset_size=50000, sample_weight=None, max_iter=
     s_comb: array, shape((n_samples choose 2), 2)
         The combinations of samples in order of comparison for lowess.
     
-    model: array, shape(max_iter, len(s_comb), 2, 2, subset_size)
-        Array tracking the sample by sample deltas to create X_new_
-    
     '''
     
     random_state = _check_random_state(random_state)
@@ -337,33 +372,27 @@ def normalize_lowess(X, y=None, subset_size=50000, sample_weight=None, max_iter=
     n_samples, n_features = X.shape
     lr = learning_rate / (n_samples)
     
-    X_new = np.log1p(X).copy() if log1p else X.copy()
-    #check subset size is within limits of X and y
-    
-    if y:
-        y_new = np.log1p(y).copy() if log1p else y.copy()
-    else:
-        #Select a subset from X to model delta matrix
-        X_sq = (X_new.sum(axis=0))**2 #based on squared probability - change to fun?
-        y_new = random_state.choice(n_features, size=subset_size,
-                                    replace=False, p=(X_sq / X_sq.sum())
-                                    )
-    
+    X_new = X.T.copy()
+
+    #get pairwise combinations of samples
     s_comb = np.array(list(itertools.combinations(range(n_samples),2)))
-    
-    #initialize step model for interpolations
-    model = np.zeros((max_iter, len(s_comb), 2, 2, subset_size))
-    
-    #initialize squared error matrix
-    squared_errors = np.zeros((max_iter, n_samples))
+
+    del(X)
+
+    if y is None:
+        y_idx = _get_subset_indicies(X_new, f, s_comb, random_state, size=subset_size)
+        y_new = X_new[y_idx,:]
+    else:
+        y_new = y.copy()
+
+    del(y_idx)
     
     for ii in range(max_iter):
+
         s_i = _get_subset_indicies(y_new, f, s_comb, random_state, size=subset_size)
-        X_new, y_new, se, m = _delta_matrix(X_new, y_new, s_i, s_comb, lr, transform)
-        
-        model[ii,:] = m
-        squared_errors[ii, :] = se
-        
+        X_new, y_new, se = _delta_matrix(X_new, y_new, s_i, s_comb, lr, extrap_fraction, 
+                                         lower_bound, transform)
+
         mse = se.mean()
         if mse < tol:
             break
@@ -372,13 +401,13 @@ def normalize_lowess(X, y=None, subset_size=50000, sample_weight=None, max_iter=
               'tolerance or the maximum number of iterations.')
     
     # capture se matrix?
-    X_new = np.expm1(X_new).T if log1p else X_new.T
-    y_new = np.expm1(y_new).T if log1p else y_new.T
+    X_new = X_new.T
+    y_new = y_new.T
     
-    return X_new, y_new, mse, ii + 1, squared_errors, s_comb, model
+    return X_new, y_new, mse, ii + 1, s_comb
 
     
-class lowessTransform():
+class lowessNorm():
     '''
     A method to guide sample normalizaiton based on lowess model of sample differences.
     
@@ -387,23 +416,23 @@ class lowessTransform():
     subset_size : int, optional
         Number of regions to guide the transformation.  If None, all are used.
     
-    sample_weight: array-like of shape (n_samples,) (default=None)
+    sample_weight : array-like of shape (n_samples,) (default=None)
         Individual weights for each sample.  If None, every sample
         will have the same weight.
     
-    max_iter: int, optional
+    max_iter : int, optional
         Maximum nubmer of iterations during fit.
         
     tol : float, (default: 0.001)
         A positive scalar giving the tolerance at which the
         model is considered to have converged. 
     
-    learning_rate: float, (default: 1.)
+    learning_rate : float, (default: 1.)
         Learning rate at each iteration. Multiple of the per sample step at each 
         iteration.  ie. Learning rate of 1.0 corrects by 1.0 / num_samples at each 
         iteration.
 
-    fun: string or function, optional. Default: 'squared'
+    fun : string or function, optional. Default: 'squared'
         Function used for determining the weigthed probability for subset selection.
     
     fun_args : dictionary, optional
@@ -415,9 +444,14 @@ class lowessTransform():
         If RandomState instance, random_state is the random number generator;
         If None, the random number generator is the RandomState instance used
         by `np.random`.
-    
-    log1p: bool, (default=True)
-        Whether to log1p transform data
+
+    extrap_fraction : float (0,1) (default=.1)
+        Fraction of largest y values to use for extrapolation where x > y.
+        0 -> no extrapolation and max(y) used for x > y
+
+    lower_bound : int, float or None (default = None)
+        Lower bound on transformed values
+
         
     Attributes
     ----------
@@ -437,16 +471,13 @@ class lowessTransform():
     squared_errors_: array shape(max_iter, n_samples)
         Squared errors at each iteration until convergence or max_iter
     
-    model_: array shape(max_iter, (n_samples choose 2), 2, 2, subset_size)
-        Array tracking the sample by sample fit lowess to correct values
-    
     sample_combinations_: array, shape((n_samples choose 2), 2)
         The combinations of samples in order of comparison for lowess.
     
     '''
     def __init__(self, subset_size=50000, sample_weight=None, max_iter=5, 
                  tol=1e-3, learning_rate=1., fun='squared', fun_args=None, 
-                 random_state=None, log1p=True):
+                 random_state=None, extrap_fraction=0.1, lower_bound = None):
         self.subset_size = subset_size
         self.sample_weight = sample_weight
         self.max_iter = max_iter
@@ -455,7 +486,8 @@ class lowessTransform():
         self.fun = fun
         self.fun_args = fun_args
         self.random_state = random_state
-        self.log1p = log1p
+        self.extrap_fraction = extrap_fraction
+        self.lower_bound = lower_bound
     
     
     def _fit(self, X, y=None, transform=False):
@@ -483,17 +515,17 @@ class lowessTransform():
     
         fun_args = {} if self.fun_args is None else self.fun_args
     
-        X_new, y_new, mse,  n_iter, s_comb, model  = normalize_lowess(X=X, y=y, 
+        X_new, y_new, mse, n_iter, s_comb  = normalize_lowess(X=X, y=y, 
             subset_size=self.subset_size, sample_weight=self.sample_weight,
             max_iter=self.max_iter, tol=self.tol, learning_rate=self.learning_rate,
             fun=self.fun, fun_args=fun_args, random_state=self.random_state,
-            log1pt=self.log1p, transform=transform)
+            extrap_fraction=self.extrap_fraction, lower_bound=self.lower_bound,
+            transform=transform)
     
         self.y_new_ = y_new
         self.mse_ = mse
         self.n_iter = n_iter
         self.sample_combinations_ = s_comb
-        self.model_ = model
         
         if transform:        
             self.X_new = X_new
